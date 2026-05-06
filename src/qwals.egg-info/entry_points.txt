@@ -1,0 +1,2 @@
+[console_scripts]
+qwals = qwals.__main__:main

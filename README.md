@@ -1,2 +1,590 @@
 # qwals
+
 Compute linguistic distance between languages using WALS-style feature data.
+
+`qwals` calculates distance at runtime from raw CSV data. No precomputed
+distance matrix is required.
+
+## Citation
+
+When using this package for research, please cite the following paper as reference:
+
+Eronen, J., Ptaszynski, M., Wicherkiewicz, T., Borges, R., Janic, K., Liu, Z.,
+Mahmud, T., & Masui, F. (2026). **Language Models Are Polyglots: Language Similarity Predicts
+Cross-Lingual Transfer Learning Performance**. *Machine Learning and Knowledge Extraction*, 8(3), 65.
+https://doi.org/10.3390/make8030065
+
+
+```
+@article{eronen2026language,
+  title={Language Models Are Polyglots: Language Similarity Predicts Cross-Lingual Transfer Learning Performance},
+  author={Eronen, Juuso and Ptaszynski, Michal and Wicherkiewicz, Tomasz and Borges, Robert and Janic, Katarzyna and Liu, Zhenzhen and Mahmud, Tanjim and Masui, Fumito},
+  journal={Machine Learning and Knowledge Extraction},
+  volume={8},
+  number={3},
+  pages={65},
+  year={2026},
+  publisher={MDPI}
+}
+```
+
+## Features
+
+- Runtime distance calculation, all hot paths in vectorised NumPy
+- Two methods: `ordinal` and `onehot`
+- Uses `WALS_feature_order.csv` for ordered feature values
+- Cleans commas and whitespace before matching values
+- Returns optional per-feature details and per-distance coverage
+- Pairwise distance matrices, plus one-vs-many and "N nearest neighbours" helpers
+- **Per-feature weights** for emphasising phonology, morphology, syntax, etc.
+- **Task-specific feature presets** from the qWALS paper (Appendix A) — `dep`, `ner`, `sentiment`, `abusive`
+- **Leave-one-feature-out optimiser** — replicates the paper's −0.99 DEP correlation
+- **`explain_distance()`** — per-feature contribution breakdown ("transparent vs lang2vec")
+- **Bootstrap confidence intervals** for distances on sparsely-attested pairs
+- **`suggest_transfer_source()`** — rank source-language candidates for cross-lingual transfer
+- **Heatmap and dendrogram plotting** (matplotlib + scipy, optional via `[viz]` extra)
+- Feature-set introspection (`features_for`, `shared_features`, `coverage_for`)
+- Disk-cached precomputed matrices — second-and-later inits in ~7 ms
+- Accepts language names, ISO 639-1 codes (`pl`, `en`), and WALS `Language_ID` codes (`pol`, `eng`) interchangeably — case-insensitive
+- Built-in CLI: `python -m qwals compare pl en` (or `qwals compare pl en` after install)
+
+## Installation
+
+Minimal install (NumPy only — needed for `distance`, `feature_distance`,
+`similarity`):
+
+```bash
+pip install .
+```
+
+With pandas (needed for `pairwise_matrix`, `save_pairwise_matrix`, and
+`distance(..., return_details=True)`):
+
+```bash
+pip install ".[reports]"
+```
+
+Development install:
+
+```bash
+pip install -e ".[dev]"
+```
+
+## Required input files
+
+### `wals-data.csv`
+
+Must contain these columns:
+
+```text
+Language_name
+Parameter_name
+Value
+```
+
+### `WALS_feature_order.csv`
+
+Must contain these columns:
+
+```text
+NAME
+VALUES IN ORDER
+```
+
+Example:
+
+```text
+NAME,VALUES IN ORDER
+Consonant-Vowel Ratio,"Low,Moderately low,Average,Moderately high,High"
+```
+
+## Quick usage
+
+```python
+from qwals import QwalsCalculator
+
+calc = QwalsCalculator(
+    "wals-data.csv",
+    "WALS_feature_order.csv",
+)
+
+d = calc.distance("English", "Japanese", method="ordinal")
+print(d)
+```
+
+## Methods
+
+### Ordinal
+
+The ordinal method uses the value order from `VALUES IN ORDER`.
+
+Formula:
+
+```text
+abs(index1 - index2) / (number_of_values - 1)
+```
+
+### Onehot
+
+The onehot method only checks exact matches:
+
+```text
+same value      -> 0
+different value -> 1
+```
+
+## Details output
+
+```python
+result = calc.distance(
+    "English",
+    "Japanese",
+    method="ordinal",
+    return_details=True,
+)
+
+print(result["distance"])
+print(result["features_used"])
+print(result["details"])
+```
+
+## Folder-based loading
+
+```python
+calc = QwalsCalculator.from_folder("data/")
+```
+
+## N nearest neighbours
+
+`nearest(language, n=10, method="ordinal", min_shared=None)` returns the
+*n* languages closest to the target as a list of `(name, distance)` tuples,
+sorted ascending. It runs as a single vectorised one-vs-all pass —
+typically a couple of milliseconds on the full WALS dataset.
+
+```python
+calc.nearest("Polish", n=5)
+# [('Lithuanian',     0.131),
+#  ('Russian',        0.138),
+#  ('Latvian',        0.146),
+#  ('Greek (Modern)', 0.163),
+#  ('Albanian',       0.173)]
+```
+
+### Why `min_shared` matters
+
+WALS is unevenly populated — many languages have only a handful of features
+documented. Without a filter, "nearest" tends to surface those sparse
+languages first because their few features happen to match the target by
+chance, giving a misleading distance of 0.0. To prevent that, `nearest`
+applies a default **`min_shared=50`** (exposed as
+`QwalsCalculator.NEAREST_MIN_SHARED`) — only languages sharing at least
+50 features with the target are considered. The threshold is on the
+*unweighted* count of overlapping features, so changing per-feature
+weights doesn't silently shift it.
+
+```python
+# Default: well-attested neighbours only.
+calc.nearest("Polish", n=5)
+
+# Looser — include languages with as few as 20 shared features.
+calc.nearest("Polish", n=5, min_shared=20)
+
+# Disable the filter entirely (the pre-0.7 behaviour).
+# Expect lots of zero-distance noise from languages with 1–3 features.
+calc.nearest("Polish", n=5, min_shared=0)
+
+# Stricter — only well-documented matches.
+calc.nearest("Polish", n=5, min_shared=80)
+```
+
+If the target itself is sparsely attested (say only 5 features documented),
+the default threshold often returns an empty list. That's intentional:
+without enough features to compare, no "nearest" claim is defensible.
+Lower `min_shared` if you want to see candidates anyway.
+
+```python
+calc.nearest("Japanese", n=3, method="onehot")
+calc.nearest("pl",       n=3)             # alias input is fine
+calc.nearest("Polish",   n=3, include_self=True)   # keeps the (Polish, 0.0) entry
+```
+
+## One-vs-many distance
+
+`distance_to_many(language, others=None, method="ordinal", min_shared=0)`
+returns a `{language: distance}` dict. With `others=None` (the default) it
+computes the distance from the target to every other language; pass an
+explicit list to restrict it. Unlike `nearest`, the default does **not**
+filter by `min_shared` — pass it explicitly when you want to drop sparsely-
+attested entries from the dict.
+
+```python
+calc.distance_to_many("Polish", others=["English", "German", "Russian"])
+# {'English': 0.222, 'German': 0.241, 'Russian': 0.084}
+
+# Drop languages with fewer than 20 shared features:
+calc.distance_to_many("Polish", min_shared=20)
+
+# Sortable, plottable as a pandas Series:
+s = calc.distance_to_many("Polish", as_series=True)
+s.sort_values().head(10)
+```
+
+This is faster than calling `distance` in a loop — both share the same
+vectorised kernel as `nearest`.
+
+## Per-feature weights
+
+By default every feature contributes equally to the distance. Pass a
+`weights` dict to the constructor (or use `set_weight` / `set_weights` /
+`reset_weights` at runtime) to emphasise some features over others. Weights
+must be non-negative and finite; a weight of `0` excludes the feature from
+the distance entirely.
+
+```python
+calc = QwalsCalculator.from_folder(
+    "data/",
+    weights={
+        "Order of Subject and Verb":  3.0,   # syntax matters more
+        "Order of Object and Verb":   3.0,
+        "Number of Genders":          0.5,   # morphology matters less
+    },
+)
+calc.distance("Polish", "English")
+
+# Adjust at runtime
+calc.set_weight("Tone", 0.0)         # ignore tone entirely
+calc.set_weights({"Velar Nasal": 2.0, "Front Rounded Vowels": 2.0})
+calc.weights                          # -> {feat: weight} of all non-1.0 features
+calc.reset_weights()                  # back to all-1.0
+```
+
+Weights are honoured by `distance`, `pairwise_matrix`, `nearest`, and
+`distance_to_many`. The weighted distance formula is
+
+```text
+sum(w[f] * mask[f] * |o1[f] - o2[f]| / (n[f] - 1))   /   sum(w[f] * mask[f])
+```
+
+(for the ordinal method; onehot is the same with `1{v1[f] != v2[f]}` in place
+of the scaled ordinal gap).
+
+`distance(..., return_details=True)` includes a `Weight` column in the
+per-feature DataFrame whenever any weight differs from 1.0.
+
+## Task-specific feature presets
+
+The qWALS paper (Eronen et al., 2026, Appendix A) reports four
+leave-one-feature-out-optimised feature subsets, one per cross-lingual
+NLP task. They're shipped as named presets:
+
+| Preset       | # features | Paper Pearson ρ vs transfer F1 |
+| ------------ | ---------: | ------------------------------ |
+| `dep`        | 75         | −0.99 (DEP)                    |
+| `ner`        | 63         | −0.81 (NER)                    |
+| `abusive`    | 53         | −0.82 (abusive language)       |
+| `sentiment`  | 21         | −0.80 (sentiment analysis)     |
+
+Apply with `use_features`:
+
+```python
+calc = QwalsCalculator.from_folder("data/")
+calc.use_features("dep")               # restrict to the 75 DEP features
+calc.distance("Polish", "English")     # task-tuned distance
+calc.nearest("Polish", n=5)            # → Ukrainian, German, Lithuanian, Russian, Danish
+calc.reset_features()                  # back to all 192 features
+```
+
+When a preset is active, the `nearest` `min_shared` default is auto-scaled
+in proportion to the active feature count (e.g. ~20 for DEP rather than
+50), so you don't get an empty result by surprise.
+
+You can also pass an explicit list:
+
+```python
+calc.use_features(["Order of Subject and Verb", "Number of Genders", "Tone"])
+```
+
+The full preset lists are available as a Python dict:
+
+```python
+from qwals import TASK_FEATURES, TASKS
+TASKS                           # ('abusive', 'sentiment', 'ner', 'dep')
+TASK_FEATURES["dep"][:3]        # first three DEP features
+```
+
+## Leave-one-feature-out (LOFO) optimisation
+
+Replicates §4.5 of the qWALS paper: greedily drop one feature at a time
+until correlation with a target signal stops improving. Use this to
+distil a custom feature set for any new task or transfer-score table:
+
+```python
+target_scores = {
+    ("Polish", "English"):  0.84,    # Polish→English transfer F1
+    ("Polish", "German"):   0.75,
+    ("Polish", "Russian"):  0.91,
+    # … all language pairs you have scored …
+}
+result = calc.optimize_features(target_scores, method="ordinal", correlation="pearson")
+print(result["pearson"], result["n_features"])    # e.g. -0.991, 75
+calc.use_features(result["features"])             # apply the optimised set
+```
+
+Returns `{features, pearson, spearman, n_features, n_dropped, history}`,
+where `history` is the per-step trace useful for plotting the dropping
+curve. Key kwargs:
+
+- `correlation`: `"pearson"` (default) or `"spearman"`
+- `direction`: `"minimise"` (low distance ↔ high transfer; default) or
+  `"maximise"` (positively-correlated targets like expert dissimilarity)
+- `max_drops` / `min_features`: stop conditions
+- `verbose=True`: print one line per drop
+
+The procedure is greedy and `O(F · L²)` per step (≈100 ms for the eight
+study languages × 192 features in the paper).
+
+## Suggesting a transfer source
+
+`suggest_transfer_source(target, task=None)` ties everything above
+together for the paper's headline use case — picking a source language
+for cross-lingual transfer:
+
+```python
+calc.suggest_transfer_source("Polish", task="dep", n=5)
+# [{'language': 'Ukrainian',  'distance': 0.05, 'n_shared': 20, 'coverage': 0.27, 'confidence': 0.49},
+#  {'language': 'German',     'distance': 0.05, 'n_shared': 37, 'coverage': 0.49, 'confidence': 0.66},
+#  {'language': 'Lithuanian', 'distance': 0.07, 'n_shared': 36, 'coverage': 0.48, 'confidence': 0.65},
+#  {'language': 'Russian',    'distance': 0.07, 'n_shared': 41, 'coverage': 0.55, 'confidence': 0.69},
+#  {'language': 'Danish',     'distance': 0.07, 'n_shared': 26, 'coverage': 0.35, 'confidence': 0.55}]
+```
+
+Each entry exposes both the raw `distance` and `n_shared` so you can
+weigh "close but sparsely-attested" vs "well-attested but mid-range"
+yourself. The `confidence` score is a deliberately simple combination —
+`(1 − distance) · √coverage` — and is provided as a convenience, not as
+a substitute for inspecting the underlying numbers (the paper showed
+that more aggressive multiplicative reliability penalties can mislead).
+
+`task=None` works on the currently-active feature set; pass an explicit
+`candidates=[...]` list to restrict the pool. The active mask is
+restored when the call returns, so `suggest_transfer_source` never
+mutates your calculator's state.
+
+## Per-feature explainability
+
+`explain_distance(L1, L2, top_k=10)` shows exactly which typological
+features are driving a given distance — the "transparent vs lang2vec"
+selling point of qWALS in plain action:
+
+```python
+calc.explain_distance("Polish", "English", top_k=5)
+#                              Feature   per_feature_distance   Weight   contribution
+#                  Number of Genders                      1.0      1.0          0.012
+#                  Order of Adjective and Noun            1.0      1.0          0.012
+#                  …
+```
+
+Returns a `pandas.DataFrame` sorted by *contribution* (descending),
+where contribution is the share of the final weighted distance that
+the feature accounts for; contributions sum to 1.0 across the table
+when `top_k=None`.
+
+## Coverage and reliability
+
+Every distance in qwals can return its own coverage information so you
+can weigh per-pair reliability:
+
+```python
+calc.distance("Polish", "English", return_coverage=True)
+# {'distance': 0.222, 'n_shared': 82, 'coverage': 0.43, 'n_total_features': 192, ...}
+
+calc.coverage_for("Polish", "Chuj")
+# {'n_shared': 12, 'lang1_total': 83, 'lang2_total': 29, 'coverage': 0.06, ...}
+```
+
+For sparsely-attested pairs, get a bootstrap confidence interval on the
+distance (resamples the shared feature index with replacement):
+
+```python
+calc.distance_ci("Polish", "Chuj", n_bootstrap=2000, rng=42)
+# {'distance': 0.20, 'ci_low': 0.07, 'ci_high': 0.35, 'std': 0.07, 'n_shared': 12, ...}
+```
+
+The CI for a richly-attested pair like Polish↔Russian (≈80 shared
+features) will be tight; the Polish↔Chuj CI above is much wider — exactly
+the sparsity-driven uncertainty the qWALS paper §4.4 calls out.
+
+To re-rank candidates in `nearest` by an *upper-CI* criterion (the
+paper's sparsity-aware ranking suggestion), pass `sort_by="upper_ci"`:
+
+```python
+calc.nearest("Polish", n=5, sort_by="upper_ci", n_bootstrap=200, rng=42)
+# [(name, distance, n_shared, ci_high), ...]
+```
+
+## Feature-set introspection
+
+`features_for(language)` returns the list of features the language has a
+value for (in the canonical `calc.features` order). `shared_features(l1, l2)`
+returns the intersection — useful for filtering before a pairwise call, or
+for diagnosing why two languages have a surprisingly small distance.
+
+```python
+len(calc.features_for("Polish"))                # e.g. 83 / 192
+calc.shared_features("Polish", "English")[:5]
+# ['Absence of Common Consonants',
+#  'Alignment of Verbal Person Marking',
+#  'Asymmetrical Case-Marking',
+#  'Coding of Nominal Plurality',
+#  'Comitatives and Instrumentals']
+```
+
+## Plotting (matplotlib + scipy)
+
+Install the `[viz]` extra to enable:
+
+```bash
+pip install "qwals[viz]"
+```
+
+Then:
+
+```python
+import matplotlib.pyplot as plt
+
+# Heatmap — reproduces the per-task panels from Figure 2 of the paper.
+calc.plot_heatmap(["pl", "en", "de", "hr", "ru", "ja", "ko"])
+
+# Dendrogram — recovers Slavic / Germanic / Koreano-Japonic groupings.
+calc.plot_dendrogram(["pl", "en", "de", "hr", "ru", "ja", "ko"], linkage_method="average")
+plt.show()
+```
+
+Both functions accept a pre-existing `Axes`, so you can compose
+multi-panel figures (e.g. side-by-side qWALS distance matrix and
+transfer-score heatmap, exactly as in the paper):
+
+```python
+fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+calc.plot_heatmap(langs, ax=axes[0], title="qWALS")
+calc.plot_dendrogram(langs, ax=axes[1], title="Hierarchical clustering")
+```
+
+## Command-line interface
+
+After `pip install` (or running `python -m qwals` from a folder containing
+the WALS CSVs):
+
+```bash
+# distance between two languages
+qwals compare pl en
+qwals compare Polish Japanese --method onehot
+
+# N nearest neighbours (default min_shared=50)
+qwals nearest Polish --n 5
+qwals nearest pl --method onehot
+qwals nearest Polish --n 5 --min-shared 20    # looser filter
+qwals nearest Polish --n 5 --min-shared 0     # no filter (noisy)
+
+# pairwise matrix to stdout (CSV) or a file
+qwals pairwise --out distances.csv
+qwals pairwise Polish English German Russian       # restrict to a subset
+
+# feature introspection
+qwals shared pl en --limit 20
+qwals features Polish
+
+# point at a different folder
+qwals --data ~/data/wals compare pl en
+qwals --no-cache compare pl en      # bypass the on-disk cache
+```
+
+`python -m qwals` is identical to the `qwals` entry point. Run with
+`--help` (or `<subcommand> --help`) for the full option list.
+
+## Language identifiers
+
+Any of the following forms is accepted everywhere a language is taken — exact
+name, case-insensitive name, ISO 639-1 (two-letter), or WALS `Language_ID`
+(three-letter, present in the data CSV).
+
+```python
+calc.distance("Polish", "English")   # exact names
+calc.distance("pl", "en")             # ISO 639-1
+calc.distance("pol", "eng")           # WALS Language_ID
+calc.distance("polish", "ENGLISH")    # case-insensitive
+calc.distance("pl", "English")        # mixed forms
+```
+
+`pairwise_matrix` accepts the same forms and always uses canonical WALS names
+in the resulting `index` and `columns`, so output is stable regardless of
+input style.
+
+You can register custom aliases at runtime:
+
+```python
+calc.add_alias("Lehia", "Polish")     # archaic name → modern
+calc.resolve_language("Lehia")        # -> "Polish"
+calc.aliases_for("Polish")            # -> ['lehia', 'pl', 'pol', 'polish']
+```
+
+The bundled ISO 639-1 table prefers WALS-friendly names where they differ
+from the standard form (e.g. `el → "Greek (Modern)"`,
+`zh → "Mandarin"`, `hr/sr → "Serbian-Croatian"`). Aliases that don't
+correspond to any language in your loaded data are silently dropped.
+
+## Notes
+
+- Only shared features between two languages are used.
+- Features are weighted equally by default; see [Per-feature weights](#per-feature-weights) to change that.
+- Values are normalized by removing commas and repeated whitespace before matching.
+- Missing feature orders are inferred from `wals-data.csv` by default.
+- To disable inferred orders:
+
+```python
+calc = QwalsCalculator(
+    "wals-data.csv",
+    "WALS_feature_order.csv",
+    infer_missing_orders=False,
+)
+```
+
+## Performance
+
+Two `int16` matrices of shape `(n_languages, n_features)` are built once at
+construction time, then cached to disk so subsequent inits are ~5–10 ms. All
+hot paths are pure NumPy with a tiled inner loop. On the bundled WALS data
+(2,673 languages × 192 features):
+
+| Operation                         | 0.1 (pandas)  | 0.3 (numpy) | 0.4 (this) | Speedup vs 0.1 |
+| --------------------------------- | ------------: | ----------: | ---------: | -------------: |
+| `init` (cold, no cache)           | ~150 ms       | ~190 ms     | ~180 ms    | ~1×            |
+| `init` (warm, disk-cached)        | n/a           | n/a         | **~7 ms**  | ~20× vs cold   |
+| `distance` (ordinal, single pair) | 22 ms         | 7 µs        | 6 µs       | ~3,600×        |
+| `distance` (onehot, single pair)  | 24 ms         | 4 µs        | 3 µs       | ~7,000×        |
+| `pairwise_matrix` (30 langs)      | 18 s          | <1 ms       | 0.2 ms     | ~90,000×       |
+| `pairwise_matrix` (full ordinal)  | ~39 h (proj.) | 1.9 s       | **1.1 s**  | ~130,000×      |
+| `pairwise_matrix` (full onehot)   | ~39 h (proj.) | 1.0 s       | **0.7 s**  | ~200,000×      |
+
+Memory of the precomputed matrices halved from 4.1 MiB → 2.05 MiB
+(int32 → int16). Alias lookup is O(1) — one extra `dict.get` on the cold path.
+
+### Disk cache
+
+By default, after the first build the precomputed matrices are written to
+`~/.cache/qwals/<hash>.npz`. The hash is keyed on the resolved CSV paths,
+their `mtime`+`size`, the package version, and the
+`infer_missing_orders` / `inferred_order_method` options — so editing the
+data CSV or upgrading the package transparently invalidates the cache.
+
+```python
+QwalsCalculator.from_folder(".", cache=True)         # default
+QwalsCalculator.from_folder(".", cache=False)        # never write
+QwalsCalculator.from_folder(".", cache="my.npz")     # custom path
+```
+
+Override the default location with the `QWALS_CACHE_DIR` env var.
+
+## License
+
+MIT
