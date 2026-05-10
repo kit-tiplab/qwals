@@ -34,3 +34,5 @@ scipy==1.17.1
 six==1.17.0
 twine==6.2.0
 urllib3==2.6.3
+qwals
+streamlit
