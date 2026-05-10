@@ -96,9 +96,9 @@ with tab_compare:
                     cov = result
 
                 col_a, col_b, col_c = st.columns(3)
-                col_a.metric("Distance", f"{dist:.4f}")
-                col_b.metric("Shared features", cov.get("n_shared", "—"))
-                col_c.metric("Coverage", f"{cov.get('coverage', 0):.1%}")
+                col_a.markdown(f"**Distance**\n\n## {dist:.4f}")
+                col_b.markdown(f"**Shared features**\n\n## {cov.get('n_shared', '—')}")
+                col_c.markdown(f"**Coverage**\n\n## {cov.get('coverage', 0):.1%}")
 
                 if show_details:
                     st.subheader("Per-feature breakdown")
