@@ -59,6 +59,17 @@ if preset != "(none — all features)":
 else:
     calc.reset_features()
 
+min_shared = st.sidebar.slider(
+    "Min shared features",
+    min_value=0,
+    max_value=192,
+    value=50,
+    step=5,
+    help="Minimum number of features two languages must share for a result to be included. "
+         "Applies to nearest neighbours and transfer source suggestions. "
+         "In the compare tab, triggers a warning when coverage falls below this threshold.",
+)
+
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
@@ -99,6 +110,12 @@ with tab_compare:
                 col_a.markdown(f"**Distance**\n\n## {dist:.4f}")
                 col_b.markdown(f"**Shared features**\n\n## {cov.get('n_shared', '—')}")
                 col_c.markdown(f"**Coverage**\n\n## {cov.get('coverage', 0):.1%}")
+                n_shared = cov.get("n_shared", 0)
+                if isinstance(n_shared, int) and n_shared < min_shared:
+                    st.warning(
+                        f"Only {n_shared} shared features — below your min_shared threshold of {min_shared}. "
+                        "Distance estimate may be unreliable."
+                    )
 
                 if show_details:
                     st.subheader("Per-feature breakdown")
@@ -118,15 +135,11 @@ with tab_compare:
 with tab_nearest:
     st.header("Nearest neighbours")
     nn_lang = st.selectbox("Target language", all_languages, index=all_languages.index("Polish") if "Polish" in all_languages else 0, key="nn_lang")
-    col_n, col_ms = st.columns(2)
-    with col_n:
-        nn_n = st.number_input("Number of neighbours", min_value=1, max_value=50, value=10, step=1)
-    with col_ms:
-        nn_ms = st.number_input("Min shared features", min_value=0, max_value=192, value=50, step=5)
+    nn_n = st.number_input("Number of neighbours", min_value=1, max_value=50, value=10, step=1)
 
     if st.button("Find neighbours", key="btn_nearest"):
         try:
-            neighbours = calc.nearest(nn_lang, n=int(nn_n), method=method, min_shared=int(nn_ms))
+            neighbours = calc.nearest(nn_lang, n=int(nn_n), method=method, min_shared=min_shared)
             if not neighbours:
                 st.warning("No neighbours found with the current min_shared threshold. Try lowering it.")
             else:
@@ -149,7 +162,7 @@ with tab_suggest:
     if st.button("Suggest", key="btn_suggest"):
         task_arg = None if sug_task == "(none — all features)" else sug_task
         try:
-            suggestions = calc.suggest_transfer_source(sug_lang, task=task_arg, n=int(sug_n))
+            suggestions = calc.suggest_transfer_source(sug_lang, task=task_arg, n=int(sug_n), min_shared=min_shared)
             import pandas as pd
             df = pd.DataFrame(suggestions)
             df.index = df.index + 1
